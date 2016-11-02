@@ -5,7 +5,8 @@ This script conducts a Spatial Life Cycle Assessment of bioethanol production in
 Life Cycle Assessment (LCA) is a methodology to determine the environmental impact from the complete life cycle of a product or service.  All life cycle stages are observed and the inputs/outputs for each life cycle stage are used in a Life Cycle Impact Assessment to determine the life cycle impacts.  This work applies these impacts from the bioethanol production life cycle to a geographic location.  This work considers the bioethanol production from cradle to ethanol distributor gate (cradle to gate).  Life cycle stages included in the study boundary are farmland establishment, feedstock maintenance and harvest, feedstock transportation to the biorefinery, ethanol conversion at the biorefinery, and ethanol distribution to the ethanol terminal.  Two feedstocks are considered for bioethanol production, a starch feedstock (corn grain) and a cellulosic feedstock (switchgrass).  A grid of quadrants is overlaid on the study area to retain life cycle impact values.
 
 Each life cycle stage has a corresponding loop in the script to distribute the impacts across the landscape.  Farmland operation life cycle stages (establishment, maintenance and harvest) are combined into one loop.  The pseudocode for the script is below.
---------
+
+
 FOR every quadrant
 	SELECT farm polygons whose centroid is contained within quadrant (selection = primary quadrant)
 	IF selection = TRUE
