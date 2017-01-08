@@ -1,0 +1,445 @@
+from __future__ import division
+import arcpy, sys, os, math, datetime, time
+#temp dir = C:/Users/Tyler/Desktop/SpatialLCA_github
+#Main directory (dir) must have 'Ref_Files' folder inside
+#***REQUIRED ARGUMENTS***
+#Argument 1: location of main directory 
+dir = sys.argv[1]
+#Argument 2: specify CG or SWG feedstock
+feedstock = sys.argv[2]
+#Argument 3: Quadrant size
+qSize = sys.argv[3]
+
+arcpy.CreateFileGDB_management(dir, 'scratch.gdb')
+arcpy.env.workspace = dir + '/scratch.gdb'
+arcpy.env.overwriteOutput = True
+tDir = arcpy.CreateFileGDB_management(dir, 'feedstockTransport.gdb')
+tDir = dir + '/feedstockTransport.gdb'
+refDir = dir + '/Ref_Files'
+
+#File Selection for Feedstock
+if feedstock == 'CG':
+    farmPoly = refDir + 'Feedstocks/cornFarmland.shp'
+    farmCentroid = refDir + '/Feedstocks/cornFarmland_centroid.shp'
+    quadDist = '80 miles'
+    biorefinery = refDir + '/Biorefinery/CornEthanolRefinery.shp'
+elif feedstock == 'SWG':
+    farmPoly = refDir + '/Feedstocks/swgFarmland.shp'
+    farmCentroid = refDir + '/Feedstocks/swgFarmland_centroid.shp'
+    quadDist = '75 Miles'
+    biorefinery = refDir + '/Biorefinery/CellulosicRefinery.shp'
+else:
+    print 'Invalid Argument 2 (Feedstock) Input'
+
+#Quadrant File
+quads = refDir + '/quads/{0}kmquad.shp'.format(qSize)
+#Spatial Reference: NAD_1983_StatePlane_North_Carolina_FIPS_3200_Feet
+sr = arcpy.SpatialReference(2264)
+g = arcpy.Geometry()
+
+# Farmland emission values in kg impact/hectare.
+# Impacts in each impact list follow the sequence: [Global warming, Acidification, Respiratory Effects, Eutrophication, Smog, Carcinogens, Non-Carcinogens]. 
+if feedstock == 'CG':
+    #Maintenance & Harvest Impacts
+    MHimpacts = [1.25E+02, 1.43E+01, 5.01E-01, 9.04E-01, 6.11E+01, 0.00E+00, 9.70E-05]
+
+    #Establishment Impacts
+    Eimpacts = [4.75E+01, 8.43E+00, 2.96E-01, 5.32E-01, 1.12E+01, 0.00E+00, 0.00E+00]
+
+    # Farm Yield in BDMT/ha
+    fYield = 8.3
+
+    #Biorefinery impacts, kg impact/year
+    bioImpacts = [92619.87, 157017.46, 59720.80, 5733.63, 3379798.59, 0.02, 1.79]
+    
+elif feedstock == 'SWG':
+    #Maintenance & Harvest Impacts
+    MHimpacts = [2.06E+02, 1.36E+00, 3.62E-02, 8.60E-02, 3.17E+02, 0.00E+00, 1.64E-05]
+    
+    #Establishment Impacts
+    Eimpacts = [1.35E+02, 9.37E+00, 3.25E-01, 5.91E-01, 3.18E+01, 0.00E+00, 0.00E+00]
+
+    fYield = 18.5 #BDMT/ha
+
+    #Biorefinery impacts, kg impact/year
+    bioImpacts = [758876741.44, 808591.21, 296056.93, 37820.19, 26681836.03, 0.05, 2.07]
+
+#Adding Establishment and Maintenance & Harvest Impacts
+totalFarmImpacts = [E + H for E,H in zip(MHimpacts, Eimpacts)]
+
+#Transport emissions associated with 1 tkm of truck transport using Diesel fuel. Format is [GWA, AA, HHPA, EA, SA, HHC,HHNC]. Kg of impact/tkm
+Timpacts = [2.46E-01, 1.50E-03, 1.10E-04, 2.28E-04, 4.24E-02, 7.57E-09, 3.42E-08]
+
+#bioGeo geometry and point specification
+bioCursor = arcpy.da.SearchCursor(biorefinery, ['SHAPE@'])
+bio = bioCursor.next()
+bioGeo = bio[0]
+
+#Feedstock Transportation Routes
+routes = refDir + '/FeedstockTransport/Routes.shp'
+routeCursor = arcpy.da.SearchCursor(routes, ['SHAPE@', 'SHAPE@XY', 'FID'])
+
+#Create product Directories
+arcpy.CreateFolder_management(dir, '{0}_Products'.format(feedstock))
+pDir = dir + '/{0}_Products'.format(feedstock)
+# Create product files based on quadrant size
+arcpy.MakeFeatureLayer_management(quads, 'quad_layer')
+totalQuads = arcpy.CopyFeatures_management('quad_layer', pDir + '/Total.shp')
+edQuads = arcpy.CopyFeatures_management('quad_layer', pDir + '/EthanolDistribution.shp')
+arcpy.SelectLayerByLocation_management('quad_layer', 'WITHIN_A_DISTANCE', bioGeo, quadDist, 'NEW_SELECTION')
+eQuads = arcpy.CopyFeatures_management('quad_layer', pDir + '/Establishment.shp')
+hQuads = arcpy.CopyFeatures_management('quad_layer', pDir + '/MaintHarvest.shp')
+ftQuads = arcpy.CopyFeatures_management('quad_layer', pDir + '/Transport.shp')
+arcpy.SelectLayerByLocation_management('quad_layer', 'WITHIN_A_DISTANCE', bioGeo, '5 kilometers', 'NEW_SELECTION')
+bioQuads = arcpy.CopyFeatures_management('quad_layer', pDir + '/Biorefinery.shp')
+
+arcpy.Delete_management('quad_layer')
+
+#Transportation quadrant layer creation to determine feedstock transportation route from each farmland.
+arcpy.MakeFeatureLayer_management(ftQuads, 'ft_layer')
+
+#Create shapefile with quadrants containing farmland polygons
+arcpy.MakeFeatureLayer_management(quads, 'quad_layer')
+arcpy.MakeFeatureLayer_management(farmCentroid, 'centroid_layer')
+arcpy.SelectLayerByLocation_management('quad_layer', 'CONTAINS', 'centroid_layer', '', 'NEW_SELECTION')
+farmQuads = arcpy.CopyFeatures_management('quad_layer', pDir + '/farmlandQuads.shp')
+countFarm = arcpy.GetCount_management(farmCentroid)
+numFQuads= int(countFarm.getOutput(0))
+arcpy.Delete_management('quad_layer')
+arcpy.Delete_management('centroid_layer')
+
+#Dictionary definitions for each life cycle stage, to retain impact values.  Key = quadrant FID, Values = impact values for quadrant
+totalDict = {}
+eDict = {}
+hDict = {}
+ftDict = {}
+bioDict = {}
+eDistDict = {}
+
+#Variables for tracking totals
+totalFarea = 0
+totaltkm = 0
+totalYield = 0
+totalDistKm = 0
+
+# Percent of impacts retained in primary quadrant = 70%, percent of impacts retained by secondary quadrants = 3.75%
+# q1 = primary quadrants, q2 = secondary quadrants
+q1 = 0.70
+q2 = 0.0375
+
+# *******TIME******
+t0 = datetime.datetime.now()
+print 'Directories have been specified.  Initializing script at time: {0}'.format(t0)
+arcpy.AddMessage('Directories have been specified.  Initializing script at time: {0}'.format(t0))
+print 'Number of farm polygons: {0}'.format(numFQuads) 
+arcpy.AddMessage('Number of farm polygons: {0}'.format(numFQuads))
+#*******TIME*****
+
+nf = 1 #Number farmland tracker
+#-----------Calculate Impacts from ESTABLISHMENT & MAINTENANCE/HARVEST stages ----------
+farmCentCursor = arcpy.da.UpdateCursor(farmCentroid, ['FID', 'SHAPE@', 'Area_ha'])
+arcpy.MakeFeatureLayer_management(quads, 'quad_layer')
+for farm in farmCentCursor:
+    farmFID = farm[0]
+    farmGeo = farm[1]
+    farmArea = farm[2] # Farm area in hectares
+    totalFarea += farmArea
+    arcpy.SelectLayerByLocation_management('quad_layer', 'CONTAINS', farmGeo, '', 'NEW_SELECTION') 
+    primaryQuadFIDList = [f[0] for f in arcpy.da.SearchCursor('quad_layer', ['quadSource'])] # Get FID of primary quadrant containing farmland centroid
+    primaryQuadFID = primaryQuadFIDList[0]
+    primaryQuadGeo = arcpy.CopyFeatures_management('quad_layer', g) #Get geometry of primary quadrant, to be used in secondary quadrant selection next
+    arcpy.SelectLayerByLocation_management('quad_layer', 'WITHIN_A_DISTANCE', primaryQuadGeo,'1 kilometers', 'NEW_SELECTION')
+    arcpy.SelectLayerByLocation_management('quad_layer', 'ARE_IDENTICAL_TO', primaryQuadGeo, '', 'REMOVE_FROM_SELECTION')
+    time.sleep(1)
+    secondaryQuadFIDList = [f[0] for f in arcpy.da.SearchCursor('quad_layer', ['quadSource'])] #Get FID of secondary quadrants
+    
+    #Scale impacts to farm area
+    farmMHimpacts = [farmArea * x for x in MHimpacts] 
+    farmEimpacts = [farmArea * x for x in Eimpacts]
+    scaleTotalFarmImpacts = [farmArea * x for x in totalFarmImpacts]
+    
+    #Scale impacts for primary quadrants
+    farmMHimpactsQ1 = [q1 * x for x in farmMHimpacts]
+    farmEimpactsQ1 = [q1 * x for x in farmEimpacts]
+    totalFarmImpactsQ1 = [q1 * x for x in scaleTotalFarmImpacts]
+
+    #Scale impacts for secondary quadrants
+    farmMHimpactsQ2 =[q2 * x for x in farmMHimpacts]
+    farmEimpactsQ2 = [q2 * x for x in farmEimpacts]
+    totalFarmImpactsQ2 = [q2 * x for x in scaleTotalFarmImpacts]
+
+    #Write primary quadrant impacts to each dictionary
+    key = primaryQuadFID
+    if key in hDict:
+        hDict[key] = [hDict[key][i] + farmMHimpactsQ1[i] for i in xrange(len(hDict[key]))]
+    else:
+        hDict[key] = farmMHimpactsQ1
+
+    if key in eDict:
+        eDict[key] = [eDict[key][i] + farmEimpactsQ1[i] for i in xrange(len(eDict[key]))]
+    else:
+        eDict[key] = farmEimpactsQ1
+
+    if key in totalDict:
+        totalDict[key] = [totalDict[key][i] + totalFarmImpactsQ1[i] for i in xrange(len(totalDict[key]))]
+    else:
+        totalDict[key] = totalFarmImpactsQ1
+    del key
+
+    #Write secondary quadrant impacts to each dictionary
+    for key in secondaryQuadFIDList:
+        if key in hDict:
+            hDict[key] = [hDict[key][i] + farmMHimpactsQ2[i] for i in xrange(len(hDict[key]))]
+        else:
+            hDict[key] = farmMHimpactsQ2
+
+        if key in eDict:
+            eDict[key] = [eDict[key][i] + farmEimpactsQ2[i] for i in xrange(len(eDict[key]))]
+        else:
+            eDict[key] = farmEimpactsQ2
+
+        if key in totalDict:
+            totalDict[key] = [totalDict[key][i] + totalFarmImpactsQ2[i] for i in xrange(len(totalDict[key]))]
+        else:
+            totalDict[key] = totalFarmImpactsQ2
+    
+    # *******TIME******
+    t01 = datetime.datetime.now()
+    c= t01-t0
+    min = divmod(c.total_seconds(), 60)[0]
+    sec = divmod(c.total_seconds(), 60)[1]
+    print 'Impacts for quadrant{0}/{1} complete. Start transportation calculations. Elapsed Time: {2} min {3} seconds'.format(nf, numFQuads, min, sec)
+    arcpy.AddMessage('Impacts for quadrant{0}/{1} complete. Start transportation calculations. Elapsed Time: {2} min {3} seconds'.format(nf, numFQuads, min, sec))
+    # ******TIME******
+
+    #Feedstock Transportation Loop
+    minDist = 9999999999
+    for rt in routeCursor:
+        rtGeotmp = rt[0]
+        tmp = rtGeotmp.queryPointAndDistance(farmGeo)
+        tmpDist = tmp[2]
+        if tmpDist < minDist:
+            bioDist = farmGeo.distanceTo(bioGeo)
+            minDist = tmpDist
+            clGeo = tmp[0]
+            rtGeo = rtGeotmp
+            pathTo = 'road'
+            if bioDist < minDist:
+                minDist = bioDist
+                clGeo = bioGeo
+                pathTo = 'bio'
+    clCoord = clGeo.firstPoint
+    farmCoord = farmGeo.firstPoint
+    array = arcpy.Array([farmCoord,clCoord])
+    line = arcpy.Polyline(array, sr)
+    routeCursor.reset()
+    if pathTo == 'road':
+        arcpy.SplitLineAtPoint_management(rtGeo, clGeo, 'in_memory/splitLine')
+        splitCursor = arcpy.da.SearchCursor('in_memory/splitLine', ['SHAPE@'])
+        lineMinDist = 9999999999
+        for segment in splitCursor:
+            lineGeotmp = segment[0]
+            lineDist = lineGeotmp.distanceTo(bioGeo)
+            if lineDist < lineMinDist:
+                lineMinDist = lineDist
+                lineGeo = lineGeotmp
+        lineUnion = line.union(lineGeo)
+        tLine = lineUnion
+        time.sleep(1)
+        arcpy.CopyFeatures_management(tLine, tDir + '/ftRoute_farmFID{0}'.format(farmFID))
+    elif pathTo == 'bio':
+        arcpy.CopyFeatures_management(tLine, tDir + '/ftRoute_farmFID{0}'.format(farmFID))
+        tLine = line
+        
+    dist = tLine.length
+    Yield = farmArea * fYield #Feedstock yield from farm, with farmArea
+    totalYield += Yield
+    distKm = dist * 0.0003048 #convert line length in ft to km
+    totalDistKm += distKm
+    tkm = Yield * distKm
+    totaltkm += tkm
+    totalTimpacts = [tkm * i for i in Timpacts]
+    #Get primary quadrants intersecting feedstock transportation route
+    arcpy.SelectLayerByLocation_management('ft_layer', 'INTERSECT', tLine, '', 'NEW_SELECTION')
+    time.sleep(1)
+    primaryFTquadList = [f[0] for f in arcpy.da.SearchCursor('ft_layer', ['quadSource'])]
+    numberFTquads = len(primaryFTquadList)
+    #Calculate scaled impacts for transportation, divided between primary and secondary quadrants along intersecting the transportation route
+    scaleTimpacts = [i / numberFTquads for i in totalTimpacts]
+    scaleTimpactsQ1 = [q1 * i for i in scaleTimpacts]
+    scaleTimpactsQ2 = [q2 * i for i in scaleTimpacts]
+    
+    #Write impacts for primary quadrants intersecting feedstock transportation route
+    for key in primaryFTquadList:
+        if key in ftDict:
+            ftDict[key] = [ftDict[key][i] + scaleTimpactsQ1[i] for i in xrange(len(ftDict[key]))]
+        else:
+            ftDict[key] = scaleTimpactsQ1
+        if key in totalDict:
+            totalDict[key] = [totalDict[key][i] + scaleTimpactsQ1[i] for i in xrange(len(totalDict[key]))]
+        else:
+            totalDict[key] = scaleTimpactsQ1
+        del key
+    primaryFTquadGeo = arcpy.CopyFeatures_management('ft_layer', g)
+    secondaryFTquadList = []
+    #Select secondary quadrants bordering primary quadrants
+    for pGeo in primaryFTquadGeo:
+        arcpy.SelectLayerByLocation_management('ft_layer', 'WITHIN_A_DISTANCE', pGeo, '1 kilometers', 'NEW_SELECTION')
+        arcpy.SelectLayerByLocation_management('ft_layer', 'ARE_IDENTICAL_TO', pGeo, '', 'REMOVE_FROM_SELECTION')
+        secondaryQuads = [f[0] for f in arcpy.da.SearchCursor('ft_layer', ['quadSource'])] #Get FID of secondary quadrants
+        secondaryFTquadList.extend(secondaryQuads)
+    #Write impacts for secondary quadrants to impact dictionaries
+    for key in secondaryFTquadList:
+        if key in ftDict:
+            ftDict[key] = [ftDict[key][i] + scaleTimpactsQ2[i] for i in xrange(len(ftDict[key]))]
+        else:
+            ftDict[key] = scaleTimpactsQ2
+        if key in totalDict:
+            totalDict[key] = [totalDict[key][i] + scaleTimpactsQ2[i] for i in xrange(len(totalDict[key]))]
+        else:
+            totalDict[key] = scaleTimpactsQ2
+        del key
+    nf += 1
+arcpy.Delete_management('ft_layer')
+
+#Time update
+t02 = datetime.datetime.now()
+c= t02-t0
+min = divmod(c.total_seconds(), 60)[0]
+sec = divmod(c.total_seconds(), 60)[1]
+print 'Farmland operation impacts and transportation complete. Start biorefinery impact calculations. Elapsed time {0} min {1} seconds'.format(min, sec)
+arcpy.AddMessage('Farmland operation impacts and transportation complete. Start biorefinery impact calculations. Elapsed time {0} min {1} seconds'.format(min, sec))
+
+#Select primary and secondary quadrants impacted from ethanol conversion at biorefinery
+bioImpactsQ1 = [q1 * x for x in bioImpacts]
+bioImpactsQ2 = [q2 * x for x in bioImpacts]
+arcpy.SelectLayerByLocation_management('quad_layer', 'CONTAINS', bioGeo, '', 'NEW_SELECTION')
+primaryBioQuadFID = int(arcpy.Describe('quad_layer').fidset) # Get FID of primary quadrant containing biorefinery point
+primaryBioQuadGeo = arcpy.CopyFeatures_management('quad_layer', g)
+arcpy.SelectLayerByLocation_management('quad_layer', 'WITHIN_A_DISTANCE', primaryBioQuadGeo, '1 kilometers', 'NEW_SELECTION')
+arcpy.SelectLayerByLocation_management('quad_layer', 'ARE_IDENTICAL_TO', primaryBioQuadGeo, '', 'REMOVE_FROM_SELECTION')
+secondaryBioQuadFIDList = [f[0] for f in arcpy.da.SearchCursor('quad_layer', ['quadSource'])] #Get FID of secondary quadrants
+#Writing bioefinery impact values to dictionaries
+key = primaryBioQuadFID
+bioDict[key] = bioImpactsQ1
+if key in totalDict:
+    totalDict[key] = [totalDict[key][i] + bioImpactsQ1[i] for i in xrange(len(totalDict[key]))]
+else:
+    totalDict[key] = bioImpactsQ1
+del key
+for key in secondaryBioQuadFIDList:
+    bioDict[key] = bioImpactsQ2
+    if key in totalDict:
+        totalDict[key] = [totalDict[key][i] + bioImpactsQ2[i] for i in xrange(len(totalDict[key]))]
+    else:
+        totalDict[key] = bioImpactsQ2
+    del key
+
+#-----------Calculate Impacts from ETHANOL DISTRIBUTION----------
+#Distribution of impacts, % of emitted pollutant(impact) that is assumed to impact the quadrants.  q0 is the emitting quadrant, q1 are the 4 quads bordering the emitting quadrant--> 0.7 + (4*0.075) = 1.00
+EtOHdistImpactsQ1 = [4.31E+03, 7.67E+01, 1.43E+00, 4.66E+00, 2.51E+03, 5.92E-05, 5.70E-04]
+EtOHdistImpactsQ2 = [1.62E+02, 2.88E+00, 5.36E-02, 1.75E-01, 9.40E+01, 2.22E-06, 2.14E-05]
+EtOHprimaryQuads = dir + '/Ref_Files/etOH_dist/etOHdistPrimaryQuads.shp'
+EtOHsecondaryQuads = dir + '/Ref_Files/etOH_dist/etOHdistSecondaryQuads.shp'
+primaryEtOHQuadFID = [f[0] for f in arcpy.da.SearchCursor(EtOHprimaryQuads, ['quadSource'])]
+secondaryEtOHQuadFID = [f[0] for f in arcpy.da.SearchCursor(EtOHsecondaryQuads, ['quadSource'])]
+primaryQuadGeo = arcpy.CopyFeatures_management('quad_layer', g)
+#Write primary quad impacts for ethanol disribution to dictionaries
+for key in primaryEtOHQuadFID:
+    if key in eDistDict:
+        eDistDict[key] = [eDistDict[key][i] + EtOHdistImpactsQ1[i] for i in xrange(len(eDistDict[key]))]
+    else:
+        eDistDict[key] = EtOHdistImpactsQ1
+    if key in totalDict:
+        totalDict[key] = [totalDict[key][i] + EtOHdistImpactsQ1[i] for i in xrange(len(totalDict[key]))]
+    else:
+        totalDict[key] = EtOHdistImpactsQ1
+    del key
+
+#Write secondaryquad impacts for ethanol disribution to dictionaries
+for key in secondaryEtOHQuadFID:
+    if key in eDistDict:
+        eDistDict[key] = [eDistDict[key][i] + EtOHdistImpactsQ2[i] for i in xrange(len(eDistDict[key]))]
+    else:
+        eDistDict[key] = EtOHdistImpactsQ1
+    if key in totalDict:
+        totalDict[key] = [totalDict[key][i] + EtOHdistImpactsQ2[i] for i in xrange(len(totalDict[key]))]
+    else:
+        totalDict[key] = EtOHdistImpactsQ2
+    del key
+    
+#-----------------------------------CALCULATIONS COMPLETE-----------------------------------
+#-------------WRITING IMPACTS FOR EACH LIFE CYCLE STAGE TO A UNIQUE SHAPEFILE-----
+
+#writing impact values from only farmland to unique shapefiles for establishment
+equadCursor = arcpy.da.UpdateCursor(eQuads, ['quadSource', 'GWA', 'AA','HHPA','EA','SA', 'HHC','HHNC'])
+for quadE in equadCursor:
+    qFID = quadE[0]
+    if qFID in eDict:
+        quadE[1:] = eDict[qFID]
+        equadCursor.updateRow(quadE)
+del equadCursor
+
+#Writing impact values from only farmland to unique shapefiles for Maintenance & Harvest
+hquadCursor = arcpy.da.UpdateCursor(hQuads, ['quadSource', 'GWA', 'AA','HHPA','EA','SA', 'HHC','HHNC'])
+for quadH in hquadCursor:
+    qFID = quadH[0]
+    if qFID in hDict:
+        quadH[1:] = hDict[qFID]
+        hquadCursor.updateRow(quadH)
+del hquadCursor
+
+#Writing emissions from transport to unique shapefile
+transQCursor = arcpy.da.UpdateCursor(ftQuads, ['quadSource', 'GWA', 'AA','HHPA','EA','SA', 'HHC','HHNC'])
+for qu in transQCursor:
+    tQuadSource = qu[0]
+    for key in ftDict:
+        if tQuadSource == key:
+            qu[1:] = ftDict[key]
+            transQCursor.updateRow(qu)
+del transQCursor
+
+#Writing biorefinery impacts to unique quadrant shapefile with only biorefinery impacts
+bquadCursor = arcpy.da.UpdateCursor(bioQuads, ['quadSource', 'GWA', 'AA','HHPA','EA','SA', 'HHC','HHNC'])
+for quadB in bquadCursor:
+    qFID = quadB[0]
+    if qFID in bioDict:
+        quadB[1:] = bioDict[qFID]
+        bquadCursor.updateRow(quadB)
+del bquadCursor
+
+#Writing emissions from etOH dist dict to unique shapefile
+distQCursor = arcpy.da.UpdateCursor(edQuads, ['quadSource', 'GWA', 'AA','HHPA','EA','SA', 'HHC','HHNC'])
+for qu in distQCursor:
+    dQuadSource = qu[0]
+    for key in eDistDict:
+        if dQuadSource == key:
+            qu[1:] = eDistDict[key]
+            distQCursor.updateRow(qu)
+del distQCursor
+
+#Writing total impacts to shapefile
+quadCursor = arcpy.da.UpdateCursor(totalQuads, ['FID', 'GWA', 'AA','HHPA','EA','SA', 'HHC','HHNC'])
+for quad in quadCursor:
+    qFID = quad[0]
+    impacts = quad[1:]
+    if qFID in totalDict:
+        for i, v in enumerate(totalDict[qFID]):
+            impacts[i] = v
+        quad[1:] = impacts
+        quadCursor.updateRow(quad)
+del quadCursor
+
+#----------TEXT FILE: Writing transportation data to text file, in 'Products' directory------------------------
+outFile = open(pDir + '/runInfo.text', 'w')
+outFile.write('total farm area = ' + str(totalFarea) +'\n'+ 'total tkm = ' + str(totaltkm) +'\n'+ 'total feedstock yield = ' + str(totalYield) +'\n'+ 'totaldistKM = ' + str(totalDistKm))
+outFile.close()
+del outFile
+
+#******TIME*********
+t6 = datetime.datetime.now()
+c= t6-t0
+min = divmod(c.total_seconds(), 60)[0]
+sec = divmod(c.total_seconds(), 60)[1]
+print 'Script complete. Total runtime: {0} min {1} seconds'.format(min, sec)
+#******TIME*********
